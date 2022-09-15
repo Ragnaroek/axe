@@ -23,6 +23,8 @@ type Arch struct {
 	Grpc     []Dependency `json:"grpc"`
 }
 
+//TODO add a config file where you have to specify the mono-repo layout so we don't have to guess that much (may be false positives with this)
+
 func main() {
 
 	monoRepoPath, err := os.Getwd() //TODO allow overwrite via flag
@@ -115,10 +117,9 @@ func contains(strs []string, str string) bool {
 	return false
 }
 
-// TODO adapt this to return a list of service-names (just strings) that this service talks to
-func checkGrpcImports(path, modName string) ([]string, error) {
+func checkGrpcImports(filePath, modName string) ([]string, error) {
 	fset := token.NewFileSet()
-	ast, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+	ast, err := parser.ParseFile(fset, filePath, nil, parser.ImportsOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -126,13 +127,19 @@ func checkGrpcImports(path, modName string) ([]string, error) {
 	imports := make([]string, 0)
 
 	for _, imp := range ast.Imports {
-		if importHasPrefix(imp, modName) && importHasSuffix(imp, "pkg/proto") { // only check module internal imports
+		if importHasPrefix(imp, modName) { // only check module internal imports
 			split := strings.Split(imp.Path.Value, "/")
-			if len(split) > 3 {
-				svcName := split[len(split)-3]
+			if importHasSuffix(imp, "pkg/proto") {
+				if len(split) > 3 {
+					svcName := split[len(split)-3]
+					imports = append(imports, svcName)
+				}
+			} else if !importHasPrefix(imp, path.Join(modName, "/pkg")) && importHasPrefix(imp, path.Join(modName, "/services")) {
+				//alternative way to include proto: directly on the top-level of the service code
+				svcName := split[len(split)-1]
+				svcName = strings.Trim(svcName, "\"")
 				imports = append(imports, svcName)
 			}
-
 		}
 	}
 	return imports, nil
