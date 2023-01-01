@@ -8,6 +8,7 @@ import (
 	"go/token"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"strings"
@@ -23,10 +24,7 @@ type Arch struct {
 	Grpc     []Dependency `json:"grpc"`
 }
 
-//TODO add a config file where you have to specify the mono-repo layout so we don't have to guess that much (may be false positives with this)
-
 func main() {
-
 	monoRepoPath, err := os.Getwd() //TODO allow overwrite via flag
 	if err != nil {
 		panic(err)
@@ -37,12 +35,12 @@ func main() {
 		panic(err)
 	}
 
-	svcPath := path.Join(monoRepoPath, "services/")
-	svcs, err := findServices(svcPath)
+	svcs, err := findServices(monoRepoPath)
 	if err != nil {
 		panic(err)
 	}
-	grpc, err := analyzeGrpc(svcPath, modName, svcs)
+
+	grpc, err := analyzeGrpc(monoRepoPath, modName, svcs)
 	if err != nil {
 		panic(err)
 	}
@@ -63,25 +61,32 @@ func main() {
 	}
 }
 
-func findServices(path string) ([]string, error) {
-	folders, err := os.ReadDir(path)
+func findServices(repoPath string) ([]string, error) {
+	out, err := exec.Command("find", repoPath, "-name", "Buildfile",
+		"-not", "-path", "*/node_modules/*", "-not", "-path",
+		"*/infrastructure/*",
+		"-not", "-path", "*/.git/*").Output()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("cannot find services to run coverage on: %w", err)
 	}
-	svcs := make([]string, 0, len(folders))
-	for _, svc := range folders {
-		svcs = append(svcs, svc.Name())
+	buildfiles := strings.Split(string(out), "\n")
+	services := make([]string, 0, len(buildfiles))
+	for _, buildfile := range buildfiles {
+		if buildfile != "" {
+			svc := strings.TrimPrefix(path.Dir(buildfile), repoPath+"/")
+			services = append(services, svc)
+		}
 	}
-	return svcs, nil
+	return services, nil
 }
 
-func analyzeGrpc(svcRootPath, modName string, svcs []string) ([]Dependency, error) {
+func analyzeGrpc(repoPath string, modName string, svcs []string) ([]Dependency, error) {
 
 	grpcDependencies := make([]Dependency, 0)
 
 	for _, svc := range svcs {
-		svcPath := path.Join(svcRootPath, svc)
 		grpcImports := make([]string, 0)
+		svcPath := path.Join(repoPath, svc)
 		err := filepath.WalkDir(svcPath, func(path string, fs fs.DirEntry, err error) error {
 			if !fs.IsDir() && strings.HasSuffix(fs.Name(), ".go") {
 				fileGrpcImports, err := checkGrpcImports(path, modName)
@@ -129,16 +134,12 @@ func checkGrpcImports(filePath, modName string) ([]string, error) {
 	for _, imp := range ast.Imports {
 		if importHasPrefix(imp, modName) { // only check module internal imports
 			split := strings.Split(imp.Path.Value, "/")
-			if importHasSuffix(imp, "pkg/proto") {
+			if importHasSuffix(imp, "proto") {
 				if len(split) > 3 {
-					svcName := split[len(split)-3]
-					imports = append(imports, svcName)
+					svcName := split[len(split)-2]
+					groupName := split[len(split)-3]
+					imports = append(imports, fmt.Sprintf("%s/%s", groupName, svcName))
 				}
-			} else if !importHasPrefix(imp, path.Join(modName, "/pkg")) && importHasPrefix(imp, path.Join(modName, "/services")) {
-				//alternative way to include proto: directly on the top-level of the service code
-				svcName := split[len(split)-1]
-				svcName = strings.Trim(svcName, "\"")
-				imports = append(imports, svcName)
 			}
 		}
 	}
