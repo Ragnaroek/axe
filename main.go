@@ -19,8 +19,13 @@ type Dependency struct {
 	To   string `json:"to"`
 }
 
+type Service struct {
+	Domain string `json:"domain"`
+	Name   string `json:"name"`
+}
+
 type Arch struct {
-	Services []string     `json:"services"`
+	Services []Service    `json:"services"`
 	Grpc     []Dependency `json:"grpc"`
 }
 
@@ -61,7 +66,7 @@ func main() {
 	}
 }
 
-func findServices(repoPath string) ([]string, error) {
+func findServices(repoPath string) ([]Service, error) {
 	out, err := exec.Command("find", repoPath, "-name", "Buildfile",
 		"-not", "-path", "*/node_modules/*", "-not", "-path",
 		"*/infrastructure/*",
@@ -70,23 +75,25 @@ func findServices(repoPath string) ([]string, error) {
 		return nil, fmt.Errorf("cannot find services to run coverage on: %w", err)
 	}
 	buildfiles := strings.Split(string(out), "\n")
-	services := make([]string, 0, len(buildfiles))
+	services := make([]Service, 0, len(buildfiles))
 	for _, buildfile := range buildfiles {
 		if buildfile != "" {
 			svc := strings.TrimPrefix(path.Dir(buildfile), repoPath+"/")
-			services = append(services, svc)
+			domain, name := path.Split(svc)
+			services = append(services, Service{Domain: strings.TrimSuffix(domain, "/"), Name: name})
 		}
 	}
 	return services, nil
 }
 
-func analyzeGrpc(repoPath string, modName string, svcs []string) ([]Dependency, error) {
+func analyzeGrpc(repoPath string, modName string, svcs []Service) ([]Dependency, error) {
 
 	grpcDependencies := make([]Dependency, 0)
 
 	for _, svc := range svcs {
 		grpcImports := make([]string, 0)
-		svcPath := path.Join(repoPath, svc)
+		svcName := path.Join(svc.Domain, svc.Name)
+		svcPath := path.Join(repoPath, svcName)
 		err := filepath.WalkDir(svcPath, func(path string, fs fs.DirEntry, err error) error {
 			if !fs.IsDir() && strings.HasSuffix(fs.Name(), ".go") {
 				fileGrpcImports, err := checkGrpcImports(path, modName)
@@ -95,7 +102,7 @@ func analyzeGrpc(repoPath string, modName string, svcs []string) ([]Dependency, 
 				}
 
 				for _, grpcImport := range fileGrpcImports {
-					if grpcImport != svc && !contains(grpcImports, grpcImport) {
+					if grpcImport != svcName && !contains(grpcImports, grpcImport) {
 						grpcImports = append(grpcImports, grpcImport)
 					}
 				}
@@ -107,7 +114,7 @@ func analyzeGrpc(repoPath string, modName string, svcs []string) ([]Dependency, 
 		}
 
 		for _, grpcImport := range grpcImports {
-			grpcDependencies = append(grpcDependencies, Dependency{From: svc, To: grpcImport})
+			grpcDependencies = append(grpcDependencies, Dependency{From: svcName, To: grpcImport})
 		}
 	}
 	return grpcDependencies, nil
